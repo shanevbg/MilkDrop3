@@ -1,0 +1,18 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/code/.vs/MilkDrop3/copilot-chat/d39332ff/sessions
+/code/.vs/MilkDrop3/CopilotIndices
+/code/.vs/MilkDrop3/FileContentIndex
+/code/.vs/MilkDrop3/v17/ipch/AutoPCH/412d8c84a2c079c2
+/code/.vs/MilkDrop3/v17/ipch/AutoPCH
+/code/.vs/MilkDrop3/v17/Preview
+/code/vis_milk2/Debug
+/code/vis_milk2/Release/BeatDrop.tlog
+/code/.vs/MilkDrop3/v17
+/.vs/MilkDrop3.2/v17
+/code/vis_milk2/Release
+/.vs
+/musikcube/bin
+/.gitignore
