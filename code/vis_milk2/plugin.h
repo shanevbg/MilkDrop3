@@ -39,6 +39,7 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <vector>
 #include "../ns-eel2/ns-eel.h"
 #include <string>
+#include <windows.h>
 
 //#include <core/sdk/IPlaybackService.h>
 
@@ -49,6 +50,7 @@ typedef enum { UI_REGULAR, UI_MENU, UI_LOAD, UI_LOAD_DEL, UI_LOAD_RENAME, UI_SAV
 typedef struct { float rad; float ang; float a; float c;  } td_vertinfo; // blending: mix = max(0,min(1,a*t + c));
 typedef char* CHARPTR;
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+
 
 #define MY_FFT_SAMPLES 512     // for old [pre-vms] milkdrop sound analysis
 typedef struct
@@ -262,8 +264,8 @@ typedef struct
 typedef struct
 {
     std::wstring  szFilename;    // without path
-    float    fRatingThis;
-    float    fRatingCum;
+    float         fRatingThis = 0.0f; // Initialize to 0.0f
+    float         fRatingCum = 0.0f;  // Initialize to 0.0f
 } PresetInfo;
 typedef std::vector<PresetInfo> PresetList;
 

@@ -4838,7 +4838,9 @@ void CPlugin::MyRenderUI(
                         int idx = m_nMashPreset[mash];
 
                         wchar_t buf[1024];
-                        swprintf(buf, L"%s%s", wasabiApiLangString(mashNames[mash]), m_presets[idx].szFilename);
+                        //swprintf(buf, L"%s%s", wasabiApiLangString(mashNames[mash]), m_presets[idx].szFilename);
+                        // Fix for the reported errors by converting `std::wstring` to `wchar_t*` using `.c_str()` method.
+                        swprintf(buf, L"%s%s", wasabiApiLangString(mashNames[mash]), m_presets[idx].szFilename.c_str());
                         RECT r2 = orig_rect;
                         r2.top += h;
                         h += m_text.DrawTextW(GetFont(SIMPLE_FONT), buf, -1, &r2, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX | (pass==0 ? DT_CALCRECT : 0), (mash==m_nMashSlot) ? PLAYLIST_COLOR_HILITE_TRACK : PLAYLIST_COLOR_NORMAL, false);
