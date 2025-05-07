@@ -455,10 +455,51 @@ int StartThreads(HINSTANCE instance) {
     // argc==1 No additional params. Output disabled.
     // argc==3 Two additional params. Output file enabled (32bit IEEE 754 FLOAT).
     // argc==4 Three additional params. Output file enabled (LITTLE ENDIAN PCM).
-    int argc = 1;
-    LPCWSTR argv[4] = { L"", L"--file", L"loopback-capture.wav", L"--int-16" };
+    int argc = 1; // Start with 1 because the first argument is always the executable path.
+    //LPCWSTR argv[4] = { L"", L"--file", L"loopback-capture.wav", L"--int-16" };
     hr = S_OK;
+    // Parse command line arguments
+    LPCWSTR cmdLine = GetCommandLineW();
+    LPCWSTR argv[5]; // Adjust size as needed based on expected parameters.
 
+    // Function to split command line into arguments
+        argc = 0; // Initialize argc to 0
+        LPCWSTR pch = cmdLine;
+
+        while (*pch) {
+            // Skip leading spaces
+            while (*pch == L' ') {
+                pch++;
+            }
+
+            if (*pch == L'\0') {
+                break;
+            }
+
+            // Handle quoted arguments
+            if (*pch == L'"') {
+                pch++; // Skip opening quote
+                argv[argc++] = pch;
+                while (*pch && *pch != L'"') {
+                    pch++;
+                }
+                if (*pch == L'"') {
+                    *const_cast<LPWSTR>(pch++) = L'\0'; // Null-terminate the argument
+                }
+            } else {
+                // Handle non-quoted arguments
+                argv[argc++] = pch;
+                LOG(L"%s", pch);
+                while (*pch && *pch != L' ') {
+                    pch++;
+                }
+                if (*pch == L' ') {
+                    *const_cast<LPWSTR>(pch++) = L'\0'; // Null-terminate the argument
+                }
+            }
+        }
+
+    // Correctly call the lambda function
     // parse command line
     CPrefs prefs(argc, argv, hr);
     if (FAILED(hr)) {

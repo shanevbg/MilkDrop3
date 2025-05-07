@@ -38,7 +38,7 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "resource.h"
 #include "wasabi.h"
 #include <shellapi.h>
-
+#include <intrin.h> // Required for __cpuid intrinsic
 extern HINSTANCE api_orig_hinstance;
 
 intptr_t myOpenURL(HWND hwnd, wchar_t *loc)
@@ -335,24 +335,20 @@ void MissingDirectX(HWND hwnd)
 bool CheckForMMX()
 {
     DWORD bMMX = 0;
-    DWORD *pbMMX = &bMMX;
+    int cpuInfo[4] = { 0 };
+
     __try {
-        __asm {
-            mov eax, 1
-            cpuid
-            mov edi, pbMMX
-            mov dword ptr [edi], edx
-        }
+        __cpuid(cpuInfo, 1); // Execute the CPUID instruction with EAX = 1
+        bMMX = cpuInfo[3];   // The result is stored in the EDX register
     }
-    __except(EXCEPTION_EXECUTE_HANDLER)
-    {
+    __except (EXCEPTION_EXECUTE_HANDLER) {
         bMMX = 0;
     }
 
-    if (bMMX & 0x00800000)  // check bit 23
-		return true;
+    if (bMMX & 0x00800000) // Check bit 23 for MMX support
+        return true;
 
-	return false;
+    return false;
 }
 
 bool CheckForSSE()
@@ -628,7 +624,7 @@ BOOL DoExplorerMenu (HWND hwnd, LPITEMIDLIST pidlMain, POINT point)
                 // restore old wndProc
                 if (g_pOldWndProc)
                 {
-                    SetWindowLongPtr(hwnd, GWL_WNDPROC, (LONG_PTR)g_pOldWndProc);
+                    SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)g_pOldWndProc);//why is identifier "GWL_WNDPROC" is undefined
                 }
 
                 //
