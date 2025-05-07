@@ -16,3 +16,8 @@
 /.vs
 /musikcube/bin
 /.gitignore
+/code/vis_milk2/x64/Release/BeatDrop.tlog
+/code/vis_milk2/x64/Release
+*.aps
+/code/vis_milk2/plugin.vcxproj
+/code/vis_milk2/plugin.vcxproj.user
