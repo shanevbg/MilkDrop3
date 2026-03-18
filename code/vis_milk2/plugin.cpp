@@ -504,6 +504,10 @@ Order of Function Calls
 #include <shellapi.h>
 #include <strsafe.h>
 #include "AutoCharFn.h"
+#include "embedded_shaders.h"
+#include "pipe_server.h"
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
 
 #define FRAND ((rand() % 7381)/7380.0f)
 
@@ -736,50 +740,97 @@ int mystrcmpiW(const wchar_t *s1, const wchar_t *s2)
 		return (LC2UC[s1[i]] < LC2UC[s2[i]]) ? -1 : 1;
 }
 
-bool ReadFileToString(const wchar_t* szBaseFilename, char* szDestText, int nMaxBytes, bool bConvertLFsToSpecialChar)
+// Copy embedded shader text to buffer, optionally converting line feeds.
+static bool CopyEmbeddedToBuffer(const char* src, char* szDestText, int nMaxBytes, bool bConvertLFsToSpecialChar)
 {
-    wchar_t szFile[MAX_PATH];
-    swprintf(szFile, L"%s%s", g_plugin.m_szMilkdrop2Path, szBaseFilename);
-
-    // read in all chars.  Replace char combos:  { 13;  13+10;  10 } with LINEFEED_CONTROL_CHAR, if bConvertLFsToSpecialChar is true.
-    FILE* f = _wfopen(szFile, L"rb");
-    if (!f)
-    {
-        wchar_t buf[1024], title[64];
-		swprintf(buf, wasabiApiLangString(IDS_UNABLE_TO_READ_DATA_FILE_X), szFile);
-		g_plugin.dumpmsg(buf);
-		MessageBoxW(NULL, buf, wasabiApiLangString(IDS_MILKDROP_ERROR,title,64), MB_OK|MB_SETFOREGROUND|MB_TOPMOST );
-		return false;
-    }
     int len = 0;
-    int x;
     char prev_ch = 0;
-    while ( (x = fgetc(f)) >= 0 && len < nMaxBytes-4 )
+    while (*src && len < nMaxBytes - 4)
     {
-        char orig_ch = (char)x;
+        char orig_ch = *src++;
         char ch = orig_ch;
         bool bSkipChar = false;
         if (bConvertLFsToSpecialChar)
         {
-            if (ch==10)
+            if (ch == 10)
             {
-                if (prev_ch==13)
+                if (prev_ch == 13)
                     bSkipChar = true;
                 else
                     ch = LINEFEED_CONTROL_CHAR;
             }
-            else if (ch==13)
+            else if (ch == 13)
                 ch = LINEFEED_CONTROL_CHAR;
         }
-
         if (!bSkipChar)
             szDestText[len++] = ch;
         prev_ch = orig_ch;
     }
     szDestText[len] = 0;
     szDestText[len++] = ' ';   // make sure there is some whitespace after
-    fclose(f);
     return true;
+}
+
+// Find an embedded shader by filename (e.g. L"data\\include.fx")
+static const char* FindEmbeddedShader(const wchar_t* szBaseFilename)
+{
+    for (int i = 0; i < k_num_embedded_shaders; i++)
+        if (_wcsicmp(k_embedded_shaders[i].filename, szBaseFilename) == 0)
+            return k_embedded_shaders[i].data;
+    return nullptr;
+}
+
+bool ReadFileToString(const wchar_t* szBaseFilename, char* szDestText, int nMaxBytes, bool bConvertLFsToSpecialChar)
+{
+    // Try embedded shader first
+    const char* embedded = FindEmbeddedShader(szBaseFilename);
+    if (embedded)
+        return CopyEmbeddedToBuffer(embedded, szDestText, nMaxBytes, bConvertLFsToSpecialChar);
+
+    // Fall back to disk file
+    wchar_t szFile[MAX_PATH];
+    swprintf(szFile, L"%s%s", g_plugin.m_szMilkdrop2Path, szBaseFilename);
+
+    FILE* f = _wfopen(szFile, L"rb");
+    if (f)
+    {
+        int len = 0;
+        int x;
+        char prev_ch = 0;
+        while ( (x = fgetc(f)) >= 0 && len < nMaxBytes-4 )
+        {
+            char orig_ch = (char)x;
+            char ch = orig_ch;
+            bool bSkipChar = false;
+            if (bConvertLFsToSpecialChar)
+            {
+                if (ch==10)
+                {
+                    if (prev_ch==13)
+                        bSkipChar = true;
+                    else
+                        ch = LINEFEED_CONTROL_CHAR;
+                }
+                else if (ch==13)
+                    ch = LINEFEED_CONTROL_CHAR;
+            }
+
+            if (!bSkipChar)
+                szDestText[len++] = ch;
+            prev_ch = orig_ch;
+        }
+        szDestText[len] = 0;
+        szDestText[len++] = ' ';   // make sure there is some whitespace after
+        fclose(f);
+        return true;
+    }
+
+    // Neither embedded nor disk found
+    wchar_t buf[1024], title[64];
+    swprintf(buf, wasabiApiLangString(IDS_UNABLE_TO_READ_DATA_FILE_X), szFile);
+    g_plugin.dumpmsg(buf);
+    MessageBoxW(NULL, buf, wasabiApiLangString(IDS_MILKDROP_ERROR,title,64), MB_OK|MB_SETFOREGROUND|MB_TOPMOST );
+    return false;
 }
 
 // these callback functions are called by menu.cpp whenever the user finishes editing an eval_ expression.
@@ -8856,4 +8907,159 @@ void CPlugin::GetSongTitle(wchar_t *szSongTitle, int nSize)
     //}
     emulatedWinampSongTitle = "";
     lstrcpynW(szSongTitle, AutoWide(emulatedWinampSongTitle.c_str(), CP_UTF8), nSize);
+}
+
+// ── Named pipe IPC message handler ──────────────────────────────────────────
+extern PipeServer g_pipeServer;
+extern bool RestartAudioCaptureWithDevice(const wchar_t* deviceName);
+
+void CPlugin::HandleIPCMessage(wchar_t* sMessage)
+{
+    if (!sMessage || !*sMessage)
+        return;
+
+    if (wcscmp(sMessage, L"NEXT") == 0 || wcscmp(sMessage, L"NEXT_PRESET") == 0) {
+        LoadRandomPreset(m_fBlendTimeAuto);
+    }
+    else if (wcscmp(sMessage, L"PREV") == 0 || wcscmp(sMessage, L"PREV_PRESET") == 0) {
+        PrevPreset(m_fBlendTimeUser);
+    }
+    else if (wcsncmp(sMessage, L"STATE", 5) == 0) {
+        HWND hWnd = GetPluginWindow();
+        RECT wr = {};
+        if (hWnd) GetWindowRect(hWnd, &wr);
+
+        wchar_t buf[2048];
+        swprintf_s(buf, _countof(buf),
+            L"PRESET=%s\n"
+            L"LOCKED=%d\n"
+            L"WINDOW=(%d,%d)-(%d,%d) %dx%d",
+            m_szCurrentPresetFile,
+            m_bPresetLockedByUser ? 1 : 0,
+            wr.left, wr.top, wr.right, wr.bottom,
+            wr.right - wr.left, wr.bottom - wr.top);
+
+        g_pipeServer.Send(buf);
+    }
+    else if (wcsncmp(sMessage, L"PRESET=", 7) == 0) {
+        std::wstring message(sMessage + 7);
+
+        size_t pos = message.find_last_of(L"\\/");
+        std::wstring sPath;
+        std::wstring sFilename;
+        if (pos != std::wstring::npos) {
+            sPath = message.substr(0, pos + 1);
+            sFilename = message.substr(pos + 1);
+        }
+        else {
+            sPath = m_szPresetDir;
+            sFilename = message;
+        }
+
+        if (!sPath.empty() && wcscmp(sPath.c_str(), m_szPresetDir) != 0) {
+            lstrcpynW(m_szPresetDir, sPath.c_str(), MAX_PATH);
+            UpdatePresetList(false, true, false);
+        }
+
+        std::wstring fullPath = std::wstring(m_szPresetDir) + sFilename;
+        LoadPreset(fullPath.c_str(), m_fBlendTimeUser);
+    }
+    else if (wcscmp(sMessage, L"SHUTDOWN") == 0) {
+        HWND hWnd = GetPluginWindow();
+        if (hWnd)
+            PostMessage(hWnd, WM_CLOSE, 0, 0);
+    }
+    else if (wcsncmp(sMessage, L"CAPTURE", 7) == 0) {
+        wchar_t szExeDir[MAX_PATH];
+        GetModuleFileNameW(NULL, szExeDir, MAX_PATH);
+        wchar_t* pSlash = wcsrchr(szExeDir, L'\\');
+        if (pSlash) *(pSlash + 1) = L'\0';
+
+        wchar_t szCaptureDir[MAX_PATH];
+        swprintf_s(szCaptureDir, L"%scapture", szExeDir);
+        CreateDirectoryW(szCaptureDir, NULL);
+
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        wchar_t szFilename[MAX_PATH];
+        swprintf_s(szFilename, L"%s\\milkdrop3_%04d%02d%02d_%02d%02d%02d.png",
+            szCaptureDir, st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond);
+
+        IDirect3DSurface9* pBackBuffer = NULL;
+        HRESULT hr = GetDevice()->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &pBackBuffer);
+        if (SUCCEEDED(hr) && pBackBuffer) {
+            hr = D3DXSaveSurfaceToFileW(szFilename, D3DXIFF_PNG, pBackBuffer, NULL, NULL);
+            pBackBuffer->Release();
+
+            if (SUCCEEDED(hr)) {
+                wchar_t response[MAX_PATH + 32];
+                swprintf_s(response, L"CAPTURE_PATH=%s", szFilename);
+                g_pipeServer.Send(response);
+            }
+            else {
+                g_pipeServer.Send(L"CAPTURE_PATH=ERROR");
+            }
+        }
+        else {
+            g_pipeServer.Send(L"CAPTURE_PATH=ERROR");
+        }
+    }
+    else if (wcsncmp(sMessage, L"DEVICE=", 7) == 0 || wcsncmp(sMessage, L"SET_DEVICE=", 11) == 0) {
+        const wchar_t* value = sMessage + (wcsncmp(sMessage, L"SET_DEVICE=", 11) == 0 ? 11 : 7);
+        std::wstring deviceName;
+        if (wcsncmp(value, L"IN|", 3) == 0) {
+            deviceName = value + 3;
+        } else if (wcsncmp(value, L"OUT|", 4) == 0) {
+            deviceName = value + 4;
+        } else {
+            deviceName = value;
+        }
+        if (RestartAudioCaptureWithDevice(deviceName.c_str())) {
+            std::wstring resp = L"DEVICE=" + deviceName;
+            g_pipeServer.Send(resp);
+        } else {
+            g_pipeServer.Send(L"DEVICE=ERROR|device not found or capture failed");
+        }
+    }
+    else if (wcscmp(sMessage, L"ENUM_DEVICES") == 0) {
+        std::wstring result = L"DEVICES=";
+        IMMDeviceEnumerator* pEnum = NULL;
+        HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+            __uuidof(IMMDeviceEnumerator), (void**)&pEnum);
+        if (SUCCEEDED(hr) && pEnum) {
+            EDataFlow flows[] = { eRender, eCapture };
+            const wchar_t* flowNames[] = { L"OUT", L"IN" };
+            for (int f = 0; f < 2; f++) {
+                IMMDeviceCollection* pCollection = NULL;
+                hr = pEnum->EnumAudioEndpoints(flows[f], DEVICE_STATE_ACTIVE, &pCollection);
+                if (SUCCEEDED(hr) && pCollection) {
+                    UINT count = 0;
+                    pCollection->GetCount(&count);
+                    for (UINT i = 0; i < count; i++) {
+                        IMMDevice* pDev = NULL;
+                        if (SUCCEEDED(pCollection->Item(i, &pDev)) && pDev) {
+                            IPropertyStore* pProps = NULL;
+                            if (SUCCEEDED(pDev->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
+                                PROPVARIANT pv;
+                                PropVariantInit(&pv);
+                                if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &pv)) && pv.pwszVal) {
+                                    if (result.size() > 8) result += L"|";
+                                    result += flowNames[f];
+                                    result += L":";
+                                    result += pv.pwszVal;
+                                }
+                                PropVariantClear(&pv);
+                                pProps->Release();
+                            }
+                            pDev->Release();
+                        }
+                    }
+                    pCollection->Release();
+                }
+            }
+            pEnum->Release();
+        }
+        g_pipeServer.Send(result);
+    }
 }

@@ -472,7 +472,7 @@ static EEL_F g_closefact = NSEEL_CLOSEFACTOR;
 static const EEL_F eel_zero=0.0, eel_one=1.0;
 
 #if defined(_MSC_VER) && _MSC_VER >= 1400
-static double __floor(double a) { return floor(a); }
+static double eel_floor(double a) { return floor(a); }
 #endif
 
 static double eel1band(double a, double b)
@@ -569,7 +569,7 @@ static functionType fnTable1[] = {
 	 { "rand",   nseel_asm_1pp,nseel_asm_1pp_end,  1, {&nseel_int_rand}, } ,
 
 #if defined(_MSC_VER) && _MSC_VER >= 1400
-   { "floor",  nseel_asm_1pdd,nseel_asm_1pdd_end, 1, {&__floor} },
+   { "floor",  nseel_asm_1pdd,nseel_asm_1pdd_end, 1, {&eel_floor} },
 #else
    { "floor",  nseel_asm_1pdd,nseel_asm_1pdd_end, 1, {&floor} },
 #endif
@@ -940,7 +940,6 @@ INT_PTR nseel_createCompiledFunction2(compileContext *ctx, int fntype, INT_PTR f
     return ((INT_PTR)(block));
   }
 }
-
 
 //---------------------------------------------------------------------------------------------------------------
 INT_PTR nseel_createCompiledFunction1(compileContext *ctx, int fntype, INT_PTR fn, INT_PTR code)
@@ -1423,7 +1422,7 @@ static char *preprocessCode(compileContext *ctx, char *expression)
 
 						while (isspace(*tmp)) tmp++;
 
-						len+=sprintf(buf+len,"_if(%s,%s,%s",l_ptr,*tmp?tmp:"0",*rptr2?rptr2:"0");
+						len+=sprintf(buf+len,"_if(%s,%s,%s",l_ptr?l_ptr:"",*tmp?tmp:"0",*rptr2?rptr2:"0");
 						ctx->l_stats[0]+=6;
 					}
 					else
@@ -1710,7 +1709,6 @@ void NSEEL_code_free(NSEEL_CODEHANDLE code)
   }
 
 }
-
 
 //------------------------------------------------------------------------------
 void NSEEL_VM_resetvars(NSEEL_VMCTX _ctx)

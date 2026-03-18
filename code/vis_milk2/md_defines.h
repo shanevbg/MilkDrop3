@@ -64,6 +64,12 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //  --> now stored in m_fAspectX, m_fInvAspectY, etc. <--
 
 #define WM_MILKDROP_SYSTRAY_MSG			WM_USER + 407
+
+// Named pipe IPC message constants (matching Milkwave/MDropDX12)
+#define WM_USER_PIPE_IPC_MESSAGE        (WM_USER + 200)
+#define WM_USER_NEXT_PRESET             (WM_USER + 100)
+#define WM_USER_PREV_PRESET             (WM_USER + 101)
+#define WM_USER_FULLSCREEN              (WM_USER + 160)
 #define IDC_MILKDROP_SYSTRAY_ICON			555
 #define ID_MILKDROP_SYSTRAY_CLOSE			556
 //#define ID_MILKDROP_SYSTRAY_RESUME			559

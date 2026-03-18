@@ -17,6 +17,7 @@
 #pragma comment(lib, "shcore.lib") // for dpi awareness
 
 #include "plugin.h"
+#include "pipe_server.h"
 #include "resource.h"
 
 #include <mutex>
@@ -35,6 +36,7 @@
 #define DEFAULT_HEIGHT 800;
 
 CPlugin g_plugin;
+PipeServer g_pipeServer;
 HINSTANCE api_orig_hinstance = nullptr;
 _locale_t g_use_C_locale;
 char keyMappings[8];
@@ -62,6 +64,99 @@ static unsigned char pcmRightOut[SAMPLE_SIZE];
 //static musik::core::sdk::IPlaybackService* playback = nullptr;
 
 static HICON icon = nullptr;
+
+// ── Audio capture restart infrastructure ──
+static HANDLE g_hCaptureThread = NULL;
+static HANDLE g_hCaptureStopEvent = NULL;
+static LoopbackCaptureThreadFunctionArguments g_captureArgs = {};
+static IMMDevice* g_pCaptureDevice = NULL;
+static std::mutex g_captureMutex;
+
+// Forward declarations from prefs.cpp
+extern HRESULT get_default_device(IMMDevice** ppMMDevice);
+extern HRESULT get_specific_device(LPCWSTR szLongName, IMMDevice** ppMMDevice);
+
+static void StopAudioCapture() {
+    std::lock_guard<std::mutex> lock(g_captureMutex);
+    if (g_hCaptureStopEvent && g_hCaptureThread) {
+        SetEvent(g_hCaptureStopEvent);
+        WaitForSingleObject(g_hCaptureThread, 3000);
+        CloseHandle(g_hCaptureThread);
+        g_hCaptureThread = NULL;
+    }
+    if (g_hCaptureStopEvent) {
+        CloseHandle(g_hCaptureStopEvent);
+        g_hCaptureStopEvent = NULL;
+    }
+    if (g_pCaptureDevice) {
+        g_pCaptureDevice->Release();
+        g_pCaptureDevice = NULL;
+    }
+    ResetAudioBuf();
+}
+
+static bool StartAudioCapture(IMMDevice* pDevice) {
+    std::lock_guard<std::mutex> lock(g_captureMutex);
+
+    g_pCaptureDevice = pDevice;
+
+    g_hCaptureStopEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!g_hCaptureStopEvent) return false;
+
+    HANDLE hStartedEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (!hStartedEvent) { CloseHandle(g_hCaptureStopEvent); g_hCaptureStopEvent = NULL; return false; }
+
+    g_captureArgs.hr = E_UNEXPECTED;
+    g_captureArgs.pMMDevice = pDevice;
+    g_captureArgs.bInt16 = false;
+    g_captureArgs.hFile = NULL;
+    g_captureArgs.hStartedEvent = hStartedEvent;
+    g_captureArgs.hStopEvent = g_hCaptureStopEvent;
+    g_captureArgs.nFrames = 0;
+
+    g_hCaptureThread = CreateThread(NULL, 0, LoopbackCaptureThreadFunction, &g_captureArgs, 0, NULL);
+    if (!g_hCaptureThread) {
+        CloseHandle(hStartedEvent);
+        CloseHandle(g_hCaptureStopEvent);
+        g_hCaptureStopEvent = NULL;
+        return false;
+    }
+
+    HANDLE waitArray[2] = { hStartedEvent, g_hCaptureThread };
+    DWORD result = WaitForMultipleObjects(2, waitArray, FALSE, 5000);
+    CloseHandle(hStartedEvent);
+
+    if (result != WAIT_OBJECT_0) {
+        SetEvent(g_hCaptureStopEvent);
+        WaitForSingleObject(g_hCaptureThread, 2000);
+        CloseHandle(g_hCaptureThread);
+        CloseHandle(g_hCaptureStopEvent);
+        g_hCaptureThread = NULL;
+        g_hCaptureStopEvent = NULL;
+        return false;
+    }
+
+    return true;
+}
+
+bool RestartAudioCaptureWithDevice(const wchar_t* deviceName) {
+    StopAudioCapture();
+
+    HRESULT hr;
+    IMMDevice* pDevice = NULL;
+
+    if (deviceName && *deviceName) {
+        hr = get_specific_device(deviceName, &pDevice);
+        if (FAILED(hr) || !pDevice) {
+            hr = get_default_device(&pDevice);
+        }
+    } else {
+        hr = get_default_device(&pDevice);
+    }
+
+    if (FAILED(hr) || !pDevice) return false;
+    return StartAudioCapture(pDevice);
+}
 
 void InitD3d(HWND hwnd, int width, int height) {
     pD3D9 = Direct3DCreate9(D3D_SDK_VERSION);
@@ -277,6 +372,31 @@ LRESULT CALLBACK StaticWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPara
             break;
         }
 
+        case WM_USER_PIPE_IPC_MESSAGE:
+        {
+            wchar_t* message = (wchar_t*)lParam;
+            DWORD_PTR dwData = (DWORD_PTR)wParam;
+            if (message) {
+                if (dwData == 1) {
+                    g_plugin.HandleIPCMessage(message);
+                }
+                free(message);
+            }
+            return 0;
+        }
+
+        case WM_USER_NEXT_PRESET:
+            g_plugin.LoadRandomPreset(g_plugin.m_fBlendTimeAuto);
+            return 0;
+
+        case WM_USER_PREV_PRESET:
+            g_plugin.PrevPreset(g_plugin.m_fBlendTimeUser);
+            return 0;
+
+        case WM_USER_FULLSCREEN:
+            ToggleFullScreen(hWnd);
+            return 0;
+
         default:
             return g_plugin.PluginShellWindowProc(hWnd, uMsg, wParam, lParam);
     }
@@ -384,6 +504,9 @@ unsigned __stdcall CreateWindowAndRun(void* data) {
 
     ShowWindow(hwnd, SW_SHOW);
 
+    // Start named pipe IPC server (\\.\pipe\Milkwave_<PID>)
+    g_pipeServer.Start(hwnd, WM_USER_PIPE_IPC_MESSAGE, WM_USER);
+
    	// SPOUT
 	// Make output resolution independent of the window size
 	// The user can adjust this subsequently by resizing the BeatBox window
@@ -420,6 +543,8 @@ unsigned __stdcall CreateWindowAndRun(void* data) {
         }
     }
 
+    g_pipeServer.Stop();
+
     g_plugin.MyWriteConfig();
     g_plugin.PluginQuit();
 
@@ -452,220 +577,18 @@ int StartThreads(HINSTANCE instance) {
     }
     CoUninitializeOnExit cuoe;
 
-    // argc==1 No additional params. Output disabled.
-    // argc==3 Two additional params. Output file enabled (32bit IEEE 754 FLOAT).
-    // argc==4 Three additional params. Output file enabled (LITTLE ENDIAN PCM).
-    int argc = 1;
-    LPCWSTR argv[4] = { L"", L"--file", L"loopback-capture.wav", L"--int-16" };
-    hr = S_OK;
-
-    // parse command line
-    CPrefs prefs(argc, argv, hr);
-    if (FAILED(hr)) {
-        ERR(L"CPrefs::CPrefs constructor failed: hr = 0x%08x", hr);
-        return -__LINE__;
-    }
-    if (S_FALSE == hr) {
-        // nothing to do
-        return 0;
-    }
-
-    // create a "loopback capture has started" event
-    HANDLE hStartedEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (NULL == hStartedEvent) {
-        ERR(L"CreateEvent failed: last error is %u", GetLastError());
-        return -__LINE__;
-    }
-    CloseHandleOnExit closeStartedEvent(hStartedEvent);
-
-    // create a "stop capturing now" event
-    HANDLE hStopEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (NULL == hStopEvent) {
-        ERR(L"CreateEvent failed: last error is %u", GetLastError());
-        return -__LINE__;
-    }
-    CloseHandleOnExit closeStopEvent(hStopEvent);
-
-    // create arguments for loopback capture thread
-    LoopbackCaptureThreadFunctionArguments threadArgs;
-    threadArgs.hr = E_UNEXPECTED; // thread will overwrite this
-    threadArgs.pMMDevice = prefs.m_pMMDevice;
-    threadArgs.bInt16 = prefs.m_bInt16;
-    threadArgs.hFile = prefs.m_hFile;
-    threadArgs.hStartedEvent = hStartedEvent;
-    threadArgs.hStopEvent = hStopEvent;
-    threadArgs.nFrames = 0;
-
-    HANDLE hThread = CreateThread(
-        NULL, 0,
-        LoopbackCaptureThreadFunction, &threadArgs,
-        0, NULL
-    );
-    if (NULL == hThread) {
-        ERR(L"CreateThread failed: last error is %u", GetLastError());
-        return -__LINE__;
-    }
-    CloseHandleOnExit closeThread(hThread);
-
-    // wait for either capture to start or the thread to end
-    HANDLE waitArray[2] = { hStartedEvent, hThread };
-    DWORD dwWaitResult;
-    dwWaitResult = WaitForMultipleObjects(
-        ARRAYSIZE(waitArray), waitArray,
-        FALSE, INFINITE
-    );
-
-    if (WAIT_OBJECT_0 + 1 == dwWaitResult) {
-        ERR(L"Thread aborted before starting to loopback capture: hr = 0x%08x", threadArgs.hr);
-        return -__LINE__;
-    }
-
-    if (WAIT_OBJECT_0 != dwWaitResult) {
-        ERR(L"Unexpected WaitForMultipleObjects return value %u", dwWaitResult);
+    // Start initial audio capture using default device
+    if (!RestartAudioCaptureWithDevice(NULL)) {
+        ERR(L"Failed to start initial audio capture");
         return -__LINE__;
     }
 
     // at this point capture is running
-    // wait for the user to press a key or for capture to error out
-    
     /*HANDLE thread =*/ StartRenderThread(instance);
     WaitForSingleObject(thread, INFINITE);
 
-    //NEED TO STOP CAPTURE
-    // at this point capture is running
-    // wait for the user to press a key or for capture to error out
-    {
-        WaitForSingleObjectOnExit waitForThread(hThread);
-        SetEventOnExit setStopEvent(hStopEvent);
-        HANDLE hStdIn = GetStdHandle(STD_INPUT_HANDLE);
-
-        if (INVALID_HANDLE_VALUE == hStdIn) {
-            ERR(L"GetStdHandle returned INVALID_HANDLE_VALUE: last error is %u", GetLastError());
-            return -__LINE__;
-        }
-
-        LOG(L"%s", L"Press Enter to quit...");
-
-        HANDLE rhHandles[2] = { hThread, hStdIn };
-
-        bool bKeepWaiting = true;
-        while (bKeepWaiting) {
-
-            dwWaitResult = WaitForMultipleObjects(2, rhHandles, FALSE, INFINITE);
-
-            switch (dwWaitResult) {
-
-            case WAIT_OBJECT_0: // hThread
-                ERR(L"%s", L"The thread terminated early - something bad happened");
-                bKeepWaiting = false;
-                break;
-
-            case WAIT_OBJECT_0 + 1: // hStdIn
-                                    // see if any of them was an Enter key-up event
-                /*INPUT_RECORD rInput[128];
-                DWORD nEvents;
-                if (!ReadConsoleInput(hStdIn, rInput, ARRAYSIZE(rInput), &nEvents)) {
-                    ERR(L"ReadConsoleInput failed: last error is %u", GetLastError());
-                    bKeepWaiting = false;
-                }
-                else {
-                    for (DWORD i = 0; i < nEvents; i++) {
-                        if (
-                            KEY_EVENT == rInput[i].EventType &&
-                            VK_RETURN == rInput[i].Event.KeyEvent.wVirtualKeyCode &&
-                            !rInput[i].Event.KeyEvent.bKeyDown
-                            ) {*/
-                            LOG(L"%s", L"Stopping capture...");
-                            bKeepWaiting = false;
-                            break;
-                /*        }
-                    }
-                    // if none of them were Enter key-up events,
-                    // continue waiting
-                }*/
-                break;
-
-            default:
-                ERR(L"WaitForMultipleObjects returned unexpected value 0x%08x", dwWaitResult);
-                bKeepWaiting = false;
-                break;
-            } // switch
-        } // while
-    } // naked scope
-
-    // at this point the thread is definitely finished
-
-    DWORD exitCode;
-    if (!GetExitCodeThread(hThread, &exitCode)) {
-        ERR(L"GetExitCodeThread failed: last error is %u", GetLastError());
-        return -__LINE__;
-    }
-
-    if (0 != exitCode) {
-        ERR(L"Loopback capture thread exit code is %u; expected 0", exitCode);
-        return -__LINE__;
-    }
-
-    if (S_OK != threadArgs.hr) {
-        ERR(L"Thread HRESULT is 0x%08x", threadArgs.hr);
-        return -__LINE__;
-    }
-
-    if (NULL != prefs.m_szFilename) {
-        // everything went well... fixup the fact chunk in the file
-        MMRESULT result = mmioClose(prefs.m_hFile, 0);
-        prefs.m_hFile = NULL;
-        if (MMSYSERR_NOERROR != result) {
-            ERR(L"mmioClose failed: MMSYSERR = %u", result);
-            return -__LINE__;
-        }
-
-        // reopen the file in read/write mode
-        MMIOINFO mi = { 0 };
-        prefs.m_hFile = mmioOpenW(const_cast<LPWSTR>(prefs.m_szFilename), &mi, MMIO_READWRITE);
-        if (NULL == prefs.m_hFile) {
-            ERR(L"mmioOpen(\"%ls\", ...) failed. wErrorRet == %u", prefs.m_szFilename, mi.wErrorRet);
-            return -__LINE__;
-        }
-
-        // descend into the RIFF/WAVE chunk
-        MMCKINFO ckRIFF = { 0 };
-        ckRIFF.ckid = MAKEFOURCC('W', 'A', 'V', 'E'); // this is right for mmioDescend
-        result = mmioDescend(prefs.m_hFile, &ckRIFF, NULL, MMIO_FINDRIFF);
-        if (MMSYSERR_NOERROR != result) {
-            ERR(L"mmioDescend(\"WAVE\") failed: MMSYSERR = %u", result);
-            return -__LINE__;
-        }
-
-        // descend into the fact chunk
-        MMCKINFO ckFact = { 0 };
-        ckFact.ckid = MAKEFOURCC('f', 'a', 'c', 't');
-        result = mmioDescend(prefs.m_hFile, &ckFact, &ckRIFF, MMIO_FINDCHUNK);
-        if (MMSYSERR_NOERROR != result) {
-            ERR(L"mmioDescend(\"fact\") failed: MMSYSERR = %u", result);
-            return -__LINE__;
-        }
-
-        // write the correct data to the fact chunk
-        LONG lBytesWritten = mmioWrite(
-            prefs.m_hFile,
-            reinterpret_cast<PCHAR>(&threadArgs.nFrames),
-            sizeof(threadArgs.nFrames)
-        );
-        if (lBytesWritten != sizeof(threadArgs.nFrames)) {
-            ERR(L"Updating the fact chunk wrote %u bytes; expected %u", lBytesWritten, (UINT32)sizeof(threadArgs.nFrames));
-            return -__LINE__;
-        }
-
-        // ascend out of the fact chunk
-        result = mmioAscend(prefs.m_hFile, &ckFact, 0);
-        if (MMSYSERR_NOERROR != result) {
-            ERR(L"mmioAscend(\"fact\") failed: MMSYSERR = %u", result);
-            return -__LINE__;
-        }
-    }
-
-    // let prefs' destructor call mmioClose
+    // Stop audio capture (render thread has exited)
+    StopAudioCapture();
 
     return 0;
 }
